@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { eq, sql, and, desc } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users } from "../drizzle/schema";
+import { InsertUser, users, stores, checkins, InsertCheckin } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -89,4 +89,101 @@ export async function getUserByOpenId(openId: string) {
   return result.length > 0 ? result[0] : undefined;
 }
 
-// TODO: add feature queries here as your schema grows.
+// Store queries
+export async function getAllStores() {
+  const db = await getDb();
+  if (!db) return [];
+  return await db.select().from(stores);
+}
+
+export async function getStoreById(storeId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(stores).where(eq(stores.id, storeId)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+// Calculate distance between two coordinates using Haversine formula
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Earth's radius in kilometers
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+export async function getNearbyStores(latitude: number, longitude: number, radiusKm: number = 50) {
+  const allStores = await getAllStores();
+  
+  const storesWithDistance = allStores.map(store => {
+    const storeLat = parseFloat(store.latitude);
+    const storeLon = parseFloat(store.longitude);
+    const distance = calculateDistance(latitude, longitude, storeLat, storeLon);
+    
+    return {
+      ...store,
+      distance,
+    };
+  });
+  
+  return storesWithDistance
+    .filter(store => store.distance <= radiusKm)
+    .sort((a, b) => a.distance - b.distance);
+}
+
+// Check-in queries
+export async function createCheckin(checkin: InsertCheckin) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  
+  const result = await db.insert(checkins).values(checkin);
+  return result;
+}
+
+export async function getUserCheckins(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  
+  const result = await db
+    .select({
+      checkin: checkins,
+      store: stores,
+    })
+    .from(checkins)
+    .leftJoin(stores, eq(checkins.storeId, stores.id))
+    .where(eq(checkins.userId, userId))
+    .orderBy(desc(checkins.createdAt));
+  
+  return result;
+}
+
+export async function getUserVisitedStoresCount(userId: number) {
+  const db = await getDb();
+  if (!db) return 0;
+  
+  const result = await db
+    .select({
+      count: sql<number>`COUNT(DISTINCT ${checkins.storeId})`,
+    })
+    .from(checkins)
+    .where(eq(checkins.userId, userId));
+  
+  return result[0]?.count ?? 0;
+}
+
+export async function hasUserCheckedInStore(userId: number, storeId: number) {
+  const db = await getDb();
+  if (!db) return false;
+  
+  const result = await db
+    .select()
+    .from(checkins)
+    .where(and(eq(checkins.userId, userId), eq(checkins.storeId, storeId)))
+    .limit(1);
+  
+  return result.length > 0;
+}
